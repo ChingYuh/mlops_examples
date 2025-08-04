@@ -1,0 +1,157 @@
+# template.yaml
+# This Infrastructure as Code (IaC) template defines all the AWS resources for the pipeline. 
+# Remember to replace your-github-username, your-repo-name, and the github-token-secret-name with your actual values.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CI/CD Pipeline for SageMaker LLMOps Demo using GitHub.
+
+Parameters:
+  RepoName:
+    Type: String
+    Default: llmops-sagemaker-demo
+    Description: Your GitHub repository name.
+  GitHubUser:
+    Type: String
+    Description: Your GitHub username.
+  BranchName:
+    Type: String
+    Default: main
+  GitHubTokenSecretName:
+    Type: String
+    Default: github-token-sagemaker-demo
+    Description: The name of the AWS Secrets Manager secret holding your GitHub token.
+
+Resources:
+  # S3 Bucket for Pipeline Artifacts and Training Data
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+
+  # IAM Role for CodeBuild
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: {Service: codebuild.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SageMakerCodeBuildPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:CreateTrainingJob
+                  - sagemaker:DescribeTrainingJob
+                  - iam:PassRole
+                Resource: "*"
+              - Effect: Allow
+                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+                Resource: ["arn:aws:logs:*:*:*"]
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
+                Resource: [!GetAtt ArtifactBucket.Arn, !Sub "${ArtifactBucket.Arn}/*"]
+
+  # IAM Role for CodePipeline
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: {Service: codepipeline.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: ["s3:*"]
+                Resource: [!GetAtt ArtifactBucket.Arn, !Sub "${ArtifactBucket.Arn}/*"]
+              - Effect: Allow
+                Action: ["codebuild:StartBuild", "codebuild:BatchGetBuilds"]
+                Resource: !GetAtt SageMakerBuildProject.Arn
+              - Effect: Allow
+                Action: ["secretsmanager:GetSecretValue"]
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GitHubTokenSecretName}-*"
+
+  # IAM Role for SageMaker Training Jobs
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: {Service: sagemaker.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
+                Resource: [!GetAtt ArtifactBucket.Arn, !Sub "${ArtifactBucket.Arn}/*"]
+
+  # CodeBuild Project
+  SageMakerBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: CODEPIPELINE }
+      Source: { Type: CODEPIPELINE, BuildSpec: buildspec.yml }
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value: !Ref ArtifactBucket
+          - Name: SAGEMAKER_ROLE
+            Value: !GetAtt SageMakerExecutionRole.Arn
+
+  # The CI/CD Pipeline
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHub_Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              OutputArtifacts: [{Name: SourceOutput}]
+              Configuration:
+                Owner: !Ref GitHubUser
+                Repo: !Ref RepoName
+                Branch: !Ref BranchName
+                PollForSourceChanges: true
+                OAuthToken: !Sub "{{resolve:secretsmanager:${GitHubTokenSecretName}:SecretString:GitHubToken}}"
+        - Name: Build
+          Actions:
+            - Name: TrainModel
+              ActionTypeId: { Category: Build, Owner: AWS, Provider: CodeBuild, Version: '1' }
+              InputArtifacts: [{Name: SourceOutput}]
+              Configuration:
+                ProjectName: !Ref SageMakerBuildProject
+
+Outputs:
+  PipelineUrl:
+    Description: URL of the created pipeline
+    Value: !Sub "https://console.aws.amazon.com/codesuite/codepipeline/pipelines/${Pipeline.Name}/view?region=${AWS::Region}"
+  ArtifactBucketName:
+    Description: Name of the S3 bucket for artifacts and data.
+    Value: !Ref ArtifactBucket

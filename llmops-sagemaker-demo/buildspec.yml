@@ -1,0 +1,21 @@
+# buildspec.yml
+# This file defines the build process for AWS CodeBuild.
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.10
+    commands:
+      - echo "Installing dependencies..."
+      - pip install "sagemaker>=2.200.0" "boto3>=1.28.0" "datasets" "scikit-learn"
+  build:
+    commands:
+      - echo "Starting SageMaker training job script..."
+      # These variables are set in the CloudFormation template
+      - export S3_BUCKET=$S3_BUCKET
+      - export SAGEMAKER_ROLE=$SAGEMAKER_ROLE
+      - python run_training_job.py
+  post_build:
+    commands:
+      - echo "Build phase completed."
